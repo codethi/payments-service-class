@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { RabbitmqService } from '../rabbitmq/rabbitmq.service';
 import { PaymentOrderMessage } from '../payment-queue.interface';
+import { RabbitmqService } from '../rabbitmq/rabbitmq.service';
 
 export interface DLQMessage {
   content: PaymentOrderMessage;
@@ -38,6 +38,7 @@ export class DlqService {
   /**
    * Obtém estatísticas da DLQ
    */
+
   async getStats(): Promise<DLQStats> {
     const channel = this.rabbitmqService.getChannel();
     if (!channel) {
@@ -65,7 +66,6 @@ export class DlqService {
 
     const messages: DLQMessage[] = [];
 
-    // Verifica se a DLQ existe (sem tentar recriar com argumentos diferentes)
     await channel.checkQueue(this.DLQ_NAME);
 
     for (let i = 0; i < limit; i++) {
@@ -80,7 +80,6 @@ export class DlqService {
           msg.content.toString(),
         ) as PaymentOrderMessage;
 
-        // Extrai informações de morte da mensagem
         const xDeath = msg.properties.headers?.['x-death'] as
           | Array<{
               reason: string;
@@ -102,12 +101,10 @@ export class DlqService {
               routingKeys: xDeath[0]['routing-keys'],
             }
           : undefined;
-
         const headers =
           msg.properties.headers && typeof msg.properties.headers === 'object'
             ? (msg.properties.headers as Record<string, unknown>)
             : undefined;
-
         messages.push({
           content,
           properties: {
@@ -117,16 +114,12 @@ export class DlqService {
           },
           deathInfo,
         });
-
-        // Devolve a mensagem para a fila (não remove)
         channel.nack(msg, false, true);
       } catch (error) {
-        // Se não conseguir parsear, ainda assim devolve
         channel.nack(msg, false, true);
         this.logger.error('Failed to parse DLQ message:', error);
       }
     }
-
     return messages;
   }
 
@@ -134,13 +127,13 @@ export class DlqService {
    * Reprocessa uma mensagem específica da DLQ
    * Remove da DLQ e publica na fila principal
    */
+
   async reprocessMessage(orderId: string): Promise<boolean> {
     const channel = this.rabbitmqService.getChannel();
     if (!channel) {
       throw new Error('RabbitMQ channel not available');
     }
 
-    // Busca mensagens até encontrar a que queremos
     const stats = await this.getStats();
     let found = false;
 
@@ -177,7 +170,6 @@ export class DlqService {
         this.logger.error('Failed to process DLQ message:', error);
       }
     }
-
     return found;
   }
 
@@ -212,7 +204,6 @@ export class DlqService {
           this.ROUTING_KEY,
           content,
         );
-
         // Remove da DLQ
         channel.ack(msg);
         processed++;
@@ -259,7 +250,6 @@ export class DlqService {
           // Encontrou! Remove permanentemente (ack sem reprocessar)
           channel.ack(msg);
           found = true;
-
           this.logger.warn(`🗑️ Message ${orderId} discarded from DLQ`);
           break;
         } else {
