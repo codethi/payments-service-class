@@ -5,10 +5,11 @@ import { PaymentQueueService } from './payment-queue/payment-queue.service';
 import { PaymentConsumerService } from './payment-consumer/payment-consumer.service';
 import { DlqService } from './dlq/dlq.service';
 import { DlqController } from './dlq/dlq.controller';
+import { MetricsController } from './metrics/metrics.controller';
 
 @Module({
   imports: [ConfigModule],
-  controllers: [DlqController],
+  controllers: [DlqController, MetricsController],
   providers: [
     RabbitmqService,
     PaymentQueueService,
