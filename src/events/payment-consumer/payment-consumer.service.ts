@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PaymentQueueService } from '../payment-queue/payment-queue.service';
 import { PaymentOrderMessage } from '../payment-queue.interface';
 import { RabbitmqService } from '../rabbitmq/rabbitmq.service';
+import { PaymentsService } from '../../payments/payments.service';
 
 export interface ConsumerMetrics {
   totalProcessed: number; // Total de mensagens processadas
@@ -44,6 +45,7 @@ export class PaymentConsumerService implements OnModuleInit {
   constructor(
     private readonly paymentQueueService: PaymentQueueService,
     private readonly rabbitMQService: RabbitmqService,
+    private readonly paymentsService: PaymentsService,
   ) {}
 
   async onModuleInit() {
@@ -78,37 +80,27 @@ export class PaymentConsumerService implements OnModuleInit {
     }
   }
 
-  private processPaymentOrder(message: PaymentOrderMessage): void {
+  private async processPaymentOrder(
+    message: PaymentOrderMessage,
+  ): Promise<void> {
     const startTime = Date.now();
     try {
-      // Log inicial com informações da mensagem
-      this.logger.log(
-        `📝 Processing payment order: ` +
-          `orderId=${message.orderId}, ` +
-          `userId=${message.userId}, ` +
-          `amount=${message.amount}`,
-      );
-
-      // Validar mensagem antes de processar
       if (!this.validateMessage(message)) {
         this.logger.error('❌ Invalid payment message received');
-        // Rejeitamos a mensagem para não ficar reprocessando
         throw new Error('Invalid payment message received');
       }
 
-      // TODO: Processar pagamento usando PaymentsService
-      // Isso será implementado nas próximas aulas
-      this.logger.log('✅ Payment order received and validated');
+      await this.paymentsService.processPayment(message);
+
+      this.logger.log('✅ Payment order processed successfully');
       this.updateMetrics(true, startTime);
     } catch (error) {
       this.updateMetrics(false, startTime);
-      // Log de erro com contexto completo
       this.logger.error(
         `❌ Failed to process payment for order ${message.orderId}:`,
         error,
       );
 
-      // IMPORTANTE: Relançamos o erro para o RabbitMQ fazer NACK
       throw error;
     }
   }
