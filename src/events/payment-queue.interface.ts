@@ -8,7 +8,6 @@ export interface PaymentOrderMessage {
     price: number; // Preço unitário no momento da compra
   }>;
   paymentMethod: string;
-  description?: string;
   createdAt?: Date;
   metadata?: {
     service: string;
