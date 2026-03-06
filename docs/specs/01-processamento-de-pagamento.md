@@ -25,11 +25,12 @@ Esta spec define a criação da entidade de persistência, o gateway simulado, o
 - Integração do processamento real no `PaymentConsumerService` existente (substituição do TODO)
 - Controller `PaymentsController` com endpoint de consulta por `orderId`
 - Endpoint de health check dedicado
+- Notificação assíncrona do resultado do pagamento via RabbitMQ para o `checkout-service`
+- Consumer no `checkout-service` que recebe o resultado e atualiza o status do pedido (`Order`)
 
 ### Fora de escopo
 
 - Integração com gateways reais (Stripe, PagSeguro, etc.)
-- Webhook/notificação para o checkout-service após processamento
 - Alterações nos endpoints existentes de DLQ (`/dlq/*`) e métricas (`/metrics/*`)
 - Autenticação/autorização nos endpoints (será tratada em spec futura)
 
@@ -136,7 +137,54 @@ O `PaymentsService` deve ser injetado no `PaymentConsumerService` via construtor
 
 ---
 
-## 7. PaymentsController
+## 7. Notificação Assíncrona — Payment Result
+
+Após processar o pagamento (aprovado ou rejeitado), o `payments-service` deve publicar o resultado em uma fila RabbitMQ para que o `checkout-service` atualize o status do pedido (`Order`) no seu próprio banco de dados.
+
+### 7.1 PaymentResultMessage (Interface)
+
+Definir a interface da mensagem de resultado em ambos os serviços:
+
+| Campo             | Tipo                          | Descrição                                      |
+|-------------------|-------------------------------|-------------------------------------------------|
+| `orderId`         | string (UUID)                 | ID do pedido no checkout-service                |
+| `status`          | `'approved'` \| `'rejected'`  | Resultado do processamento                      |
+| `transactionId`   | string                        | ID da transação gerado pelo gateway             |
+| `rejectionReason` | string \| null                | Motivo da rejeição (null se aprovado)           |
+| `processedAt`     | string (ISO 8601)             | Timestamp do processamento                      |
+
+### 7.2 Topologia RabbitMQ
+
+Reutilizar a exchange `payments` (topic) já existente, adicionando uma nova routing key e fila:
+
+| Componente       | Valor                    | Descrição                                         |
+|------------------|--------------------------|----------------------------------------------------|
+| Exchange         | `payments`               | Reutiliza a exchange topic existente               |
+| Routing Key      | `payment.result`         | Nova routing key para resultados de pagamento      |
+| Queue            | `payment_result_queue`   | Nova fila consumida pelo checkout-service          |
+
+A fila `payment_result_queue` deve ser durável e vinculada à exchange `payments` com routing key `payment.result`. Deve seguir o mesmo padrão de retry/DLQ das filas existentes.
+
+### 7.3 Publicação no payments-service
+
+**Onde:** `PaymentConsumerService.processPaymentOrder()`, imediatamente após o `processPayment()` retornar com sucesso.
+
+**Fluxo:**
+
+1. O `processPayment` conclui o processamento e salva o `Payment` com status final (`approved` ou `rejected`)
+2. Construir a mensagem `PaymentResultMessage` com os dados do pagamento processado
+3. Publicar na exchange `payments` com routing key `payment.result` usando o `PaymentResultPublisherService`
+4. Logar a publicação com orderId e status
+
+**Tratamento de erro:** se a publicação falhar, o erro deve ser logado mas **não** deve impedir o fluxo principal (o pagamento já foi processado e salvo). A consulta via `GET /payments/:orderId` continua funcionando como fallback.
+
+**Implementação:** criar um `PaymentResultPublisherService` no `EventsModule` que encapsula a lógica de publicação (exchange, routing key, serialização). O `PaymentConsumerService` já tem acesso a este módulo e invoca a publicação após o `processPayment()` retornar com sucesso, eliminando a necessidade de alterar as dependências do `PaymentsModule`.
+
+**Nota:** o consumer que recebe essa mensagem no `checkout-service` está definido na spec `checkout-service/docs/specs/04-implement-order-checkout.md`.
+
+---
+
+## 8. PaymentsController
 
 Novo controller para expor endpoints REST de consulta de pagamentos.
 
@@ -156,7 +204,7 @@ Retornar objeto com mensagem indicando que o pagamento não foi encontrado para 
 
 ---
 
-## 8. Health Check
+## 9. Health Check
 
 ### Endpoint
 
@@ -173,9 +221,9 @@ Retornar um objeto contendo:
 
 ---
 
-## 9. Estrutura de Módulos
+## 10. Estrutura de Módulos
 
-### PaymentsModule (novo)
+#### PaymentsModule (novo)
 
 Módulo dedicado ao domínio de pagamentos, contendo:
 - `Payment` (entidade registrada via TypeORM)
@@ -185,17 +233,18 @@ Módulo dedicado ao domínio de pagamentos, contendo:
 
 Este módulo deve exportar o `PaymentsService` para que o `EventsModule` possa utilizá-lo.
 
-### EventsModule (alteração)
+#### EventsModule (alteração)
 
-Importar o `PaymentsModule` para ter acesso ao `PaymentsService` e injetá-lo no `PaymentConsumerService`.
+- Importar o `PaymentsModule` para ter acesso ao `PaymentsService` e injetá-lo no `PaymentConsumerService`
+- Criar o `PaymentResultPublisherService` para encapsular a publicação de resultados de pagamento
 
-### AppModule (alteração)
+#### AppModule (alteração)
 
 Importar o `PaymentsModule` na raiz para que o controller e as entidades sejam registrados.
 
 ---
 
-## 10. Critérios de Aceite
+## 11. Critérios de Aceite
 
 ### CA-01: Persistência do pagamento
 - Ao receber uma mensagem válida da fila, um registro `Payment` deve ser criado na tabela `payments` com status `pending`, e atualizado para `approved` ou `rejected` após processamento.
@@ -233,51 +282,60 @@ Importar o `PaymentsModule` na raiz para que o controller e as entidades sejam r
 ### CA-12: Idempotência
 - Se uma mensagem com o mesmo `orderId` for processada novamente (ex: reprocessamento da DLQ), o serviço deve lidar com isso adequadamente — não deve criar registros duplicados para o mesmo `orderId`.
 
+### CA-13: Publicação do resultado do pagamento
+- Após processar um pagamento (aprovado ou rejeitado), o `payments-service` deve publicar uma mensagem `PaymentResultMessage` na exchange `payments` com routing key `payment.result`.
+
+### CA-14: Resiliência da publicação
+- Se a publicação do resultado falhar (ex: RabbitMQ indisponível), o pagamento já processado e salvo no banco do `payments-service` não deve ser afetado. O erro deve ser logado. A consulta via `GET /payments/:orderId` continua funcionando como fallback.
+
 ---
 
-## 11. Observações Técnicas
+## 12. Observações Técnicas
 
 - A entidade `Payment` será auto-sincronizada em ambiente de desenvolvimento pelo TypeORM (`synchronize: true`).
 - O padrão de entidades `**/*.entity{.ts,.js}` já está configurado no `database.config.ts`.
 - A latência simulada no `FakePaymentGatewayService` é proposital para simular condições reais e testar o comportamento assíncrono.
 - O `FakePaymentGatewayService` deve ser um provider injetável para facilitar substituição futura por um gateway real.
+- A publicação do resultado é fire-and-forget com log de erro. Em caso de falha, o dado está salvo no banco e pode ser consultado via REST.
+- O consumer que recebe a mensagem `PaymentResultMessage` no `checkout-service` está especificado na spec `checkout-service/docs/specs/04-implement-order-checkout.md`.
 
 ---
 
-## 12. Dependências entre Componentes
+## 13. Dependências entre Componentes
 
 ```
-checkout-service
-    │
-    ▼ (publica na fila payment_queue via RabbitMQ)
-    │
-PaymentConsumerService (consome da fila, valida, delega)
-    │
-    ▼
-PaymentsService (orquestra processamento)
-    │
-    ├──▶ FakePaymentGatewayService (simula gateway externo)
-    │
-    └──▶ Payment Entity / TypeORM (persistência no PostgreSQL)
-
-PaymentsController ──▶ PaymentsService (consulta via REST)
+checkout-service                                payments-service
+│                                               ┌─────────────────────────────────┐
+│   (publica na fila payment_queue)             │                                 │
+├──────────────────▶ payment_queue ────────────▶│  PaymentConsumerService          │
+│                                               │    │ processPaymentOrder()      │
+│                                               │    └──▶ PaymentsService         │
+│                                               │           │ processPayment()     │
+│                                               │           ├──▶ FakePaymentGateway│
+│   (consome da fila payment_result_queue)      │           └──▶ Payment Entity/DB │
+│◀─────────────────  payment_result_queue ◀────│                                 │
+│                                               │  PaymentResultPublisherService   │
+│                                               │    └──▶ publica payment.result   │
+│                                               │                                 │
+│                                               │  PaymentsController              │
+│                                               │    └──▶ PaymentsService (REST)   │
+│                                               └─────────────────────────────────┘
 ```
 
 ---
 
-## 13. Arquivos Impactados
+## 14. Arquivos Impactados
 
-| Arquivo                                          | Ação     |
-|--------------------------------------------------|----------|
-| `src/payments/payment.entity.ts`                 | Criar    |
-| `src/payments/payments.service.ts`               | Criar    |
-| `src/payments/payments.controller.ts`            | Criar    |
-| `src/payments/payments.module.ts`                | Criar    |
-| `src/payments/fake-payment-gateway.service.ts`   | Criar    |
-| `src/events/payment-consumer/payment-consumer.service.ts` | Alterar  |
-| `src/events/events.module.ts`                    | Alterar  |
-| `src/app.module.ts`                              | Alterar  |
-| `src/app.controller.ts`                          | Alterar  |
-
-
-faça um commit apenas de toda implementação, no final.
+| Arquivo                                                    | Ação    |
+|------------------------------------------------------------|---------|
+| `src/payments/payment.entity.ts`                           | Criar   |
+| `src/payments/payments.service.ts`                         | Criar   |
+| `src/payments/payments.controller.ts`                      | Criar   |
+| `src/payments/payments.module.ts`                          | Criar   |
+| `src/payments/fake-payment-gateway.service.ts`             | Criar   |
+| `src/events/payment-result/payment-result-publisher.service.ts` | Criar   |
+| `src/events/payment-result/payment-result.interface.ts`    | Criar   |
+| `src/events/payment-consumer/payment-consumer.service.ts`  | Alterar |
+| `src/events/events.module.ts`                              | Alterar |
+| `src/app.module.ts`                                        | Alterar |
+| `src/app.controller.ts`                                    | Alterar |

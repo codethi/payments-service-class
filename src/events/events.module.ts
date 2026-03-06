@@ -7,6 +7,7 @@ import { DlqService } from './dlq/dlq.service';
 import { DlqController } from './dlq/dlq.controller';
 import { MetricsController } from './metrics/metrics.controller';
 import { PaymentsModule } from '../payments/payments.module';
+import { PaymentResultPublisherService } from './payment-result/payment-result-publisher.service';
 
 @Module({
   imports: [ConfigModule, PaymentsModule],
@@ -16,6 +17,7 @@ import { PaymentsModule } from '../payments/payments.module';
     PaymentQueueService,
     PaymentConsumerService,
     DlqService,
+    PaymentResultPublisherService,
   ],
 })
 export class EventsModule {}
