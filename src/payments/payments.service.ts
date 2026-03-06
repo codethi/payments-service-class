@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { Payment, PaymentStatus } from './payment.entity';
 import { FakePaymentGatewayService } from './fake-payment-gateway.service';
 import { PaymentOrderMessage } from '../events/payment-queue.interface';
+import { MetricsService } from '../metrics/metrics.service';
 
 @Injectable()
 export class PaymentsService {
@@ -13,6 +14,7 @@ export class PaymentsService {
     @InjectRepository(Payment)
     private readonly paymentRepository: Repository<Payment>,
     private readonly gateway: FakePaymentGatewayService,
+    private readonly metricsService: MetricsService,
   ) {}
 
   async processPayment(message: PaymentOrderMessage): Promise<Payment> {
@@ -54,11 +56,28 @@ export class PaymentsService {
 
     await this.paymentRepository.save(payment);
 
+    this.metricsService.paymentsProcessedTotal.inc();
+
+    if (payment.status === PaymentStatus.APPROVED) {
+      this.metricsService.paymentsApprovedTotal.inc();
+    } else {
+      this.metricsService.paymentsRejectedTotal.inc({
+        reason: this.normalizeRejectionReason(result.rejectionReason),
+      });
+    }
+
     this.logger.log(
       `💳 Payment processed: orderId=${payment.orderId}, status=${payment.status}, transactionId=${payment.transactionId}`,
     );
 
     return payment;
+  }
+
+  private normalizeRejectionReason(reason?: string): string {
+    if (reason?.includes('Limite')) return 'limit_exceeded';
+    if (reason?.includes('Cartão') || reason?.includes('operadora'))
+      return 'card_declined';
+    return 'unknown';
   }
 
   async findByOrderId(orderId: string): Promise<Payment> {

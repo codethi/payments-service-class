@@ -4,7 +4,7 @@ import {
   ConsumerMetrics,
 } from '../payment-consumer/payment-consumer.service';
 
-@Controller('metrics')
+@Controller('consumer-metrics')
 export class MetricsController {
   private readonly logger = new Logger(MetricsController.name);
 
