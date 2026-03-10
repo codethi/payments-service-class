@@ -19,5 +19,6 @@ import { PaymentResultPublisherService } from './payment-result/payment-result-p
     DlqService,
     PaymentResultPublisherService,
   ],
+  exports: [RabbitmqService],
 })
 export class EventsModule {}
